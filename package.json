@@ -1,0 +1,49 @@
+{
+  "name": "dsh-updater",
+  "version": "0.1.0",
+  "description": "Install-aware update notifications and one-click DSH updates for the Web profile",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-sidebar",
+        "@deepseek-ai/dsh-client-ui-settings",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "scripts": {
+    "test": "node --check lib/index.js && node --check lib/client.js && node --test"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "updater",
+    "self-update"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "semver": "^7.7.2"
+  }
+}
