@@ -1,0 +1,4 @@
+# Mount the install-aware Host updater and its Web client surfaces.
+- insert:
+    - id: dsh-updater
+      name: dsh-updater
