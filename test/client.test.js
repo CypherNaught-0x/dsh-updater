@@ -132,6 +132,86 @@ test('client controller checks and updates through fixed same-origin routes', as
   assert.equal(controller.getSnapshot().update.status, 'succeeded')
 })
 
+test('updates publish immediate progress before the Host operation completes', async () => {
+  const { plugin } = await loadClient()
+  let releaseUpdate
+  const updateReady = new Promise(resolve => { releaseUpdate = resolve })
+  const controller = plugin.createClientController(async (url) => {
+    if (url === '/dsh-updater/check') {
+      return {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            status: 'ready',
+            currentVersion: '1.0.0',
+            latestVersion: '1.0.1',
+            updateAvailable: true,
+            install: { canAutoUpdate: true, actionLabel: 'Update DSH' },
+            update: { status: 'idle' },
+          })
+        },
+      }
+    }
+    await updateReady
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          status: 'ready',
+          currentVersion: '1.0.0',
+          latestVersion: '1.0.1',
+          updateAvailable: false,
+          install: { canAutoUpdate: true, actionLabel: 'Update DSH' },
+          update: { status: 'succeeded', message: 'Updated on disk.' },
+        })
+      },
+    }
+  })
+
+  await controller.check()
+  const updating = controller.update()
+  assert.equal(controller.getSnapshot().update.status, 'running')
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /This can take a few minutes/)
+  assert.match(textOf(plugin.UpdaterAction({ controller, wide: true })), /Updating DSH/)
+  assert.match(textOf(plugin.UpdaterSection({ controller })), /This can take a few minutes/)
+
+  releaseUpdate()
+  await updating
+  assert.equal(controller.getSnapshot().update.status, 'succeeded')
+})
+
+test('update request failures replace progress with failure feedback', async () => {
+  const { plugin } = await loadClient()
+  const controller = plugin.createClientController(async (url) => url === '/dsh-updater/check'
+    ? {
+        ok: true,
+        status: 200,
+        async text() {
+          return JSON.stringify({
+            status: 'ready',
+            currentVersion: '1.0.0',
+            latestVersion: '1.0.1',
+            updateAvailable: true,
+            install: { canAutoUpdate: true },
+            update: { status: 'idle' },
+          })
+        },
+      }
+    : {
+        ok: false,
+        status: 502,
+        async text() { return '' },
+      })
+
+  await controller.check()
+  await controller.update()
+  assert.equal(controller.getSnapshot().update.status, 'failed')
+  assert.equal(controller.getSnapshot().update.error, 'Update request failed with HTTP 502.')
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /DSH update failed/)
+})
+
 test('manual checks publish immediate progress and an up-to-date result', async () => {
   const { plugin } = await loadClient()
   let release

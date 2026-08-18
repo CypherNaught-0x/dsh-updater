@@ -9,7 +9,7 @@ An install-aware update plugin for the DeepSeek Harness Web profile. It checks t
 - Uses the npm `latest` dist-tag for stable installations and `next` for prerelease installations.
 - Uses the source checkout's configured Git upstream for source runs.
 - Shows an update banner in `shell.overlay`, a persistent sidebar footer action, and a complete **Settings → DSH Updater** page.
-- Reports manual-check progress, successful up-to-date results, and request failures immediately in the GUI.
+- Reports check and update progress, successful completion, up-to-date results, and request failures immediately in the GUI.
 - Runs only a fixed update plan selected by the Host; the browser cannot submit commands or paths.
 - Rejects non-loopback requests and cross-origin update actions.
 - Refuses to pull a dirty, ahead, detached, or upstream-less source checkout.
