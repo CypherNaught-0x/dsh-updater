@@ -1,6 +1,6 @@
 {
   "name": "dsh-updater",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Install-aware update notifications and one-click DSH updates for the Web profile",
   "type": "module",
   "main": "./lib/index.js",

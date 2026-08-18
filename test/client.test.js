@@ -16,6 +16,12 @@ function reactStub() {
   }
 }
 
+function textOf(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  return (node.children ?? []).map(textOf).join(' ')
+}
+
 async function loadClient() {
   let definition
   globalThis.window = {
@@ -70,15 +76,15 @@ test('client registers additive overlay, sidebar, and settings surfaces', async 
   globalThis.fetch = async () => ({
     ok: true,
     status: 200,
-    async json() {
-      return {
+    async text() {
+      return JSON.stringify({
         status: 'ready',
         currentVersion: '1.0.0',
         latestVersion: '1.0.1',
         updateAvailable: true,
         install: { label: 'npm global installation', canAutoUpdate: true, actionLabel: 'Update DSH' },
         update: { status: 'idle' },
-      }
+      })
     },
   })
   try {
@@ -115,7 +121,7 @@ test('client controller checks and updates through fixed same-origin routes', as
   const controller = plugin.createClientController(async (url, options) => {
     requests.push({ url, options })
     const value = responses.shift()
-    return { ok: true, status: 200, async json() { return value } }
+    return { ok: true, status: 200, async text() { return JSON.stringify(value) } }
   })
   await controller.check()
   await controller.update()
@@ -124,6 +130,55 @@ test('client controller checks and updates through fixed same-origin routes', as
     ['/dsh-updater/update', 'POST'],
   ])
   assert.equal(controller.getSnapshot().update.status, 'succeeded')
+})
+
+test('manual checks publish immediate progress and an up-to-date result', async () => {
+  const { plugin } = await loadClient()
+  let release
+  const responseReady = new Promise(resolve => { release = resolve })
+  const controller = plugin.createClientController(async () => {
+    await responseReady
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          status: 'ready',
+          currentVersion: '1.0.0',
+          latestVersion: '1.0.0',
+          updateAvailable: false,
+          update: { status: 'idle' },
+        })
+      },
+    }
+  })
+
+  const checking = controller.check()
+  assert.equal(controller.getSnapshot().status, 'checking')
+  assert.equal(controller.getSnapshot().check.status, 'running')
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /Checking for DSH updates/)
+
+  release()
+  await checking
+  assert.equal(controller.getSnapshot().check.status, 'succeeded')
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /DSH is up to date/)
+  assert.match(textOf(plugin.UpdaterAction({ controller, wide: true })), /DSH is up to date/)
+})
+
+test('empty error responses become actionable check feedback', async () => {
+  const { plugin } = await loadClient()
+  const controller = plugin.createClientController(async () => ({
+    ok: false,
+    status: 405,
+    async text() { return '' },
+  }))
+
+  await controller.check()
+  assert.equal(controller.getSnapshot().check.status, 'failed')
+  assert.equal(controller.getSnapshot().error, 'Update request failed with HTTP 405.')
+  const overlayText = textOf(plugin.UpdaterOverlay({ controller }))
+  assert.match(overlayText, /DSH update check failed/)
+  assert.match(overlayText, /HTTP 405/)
 })
 
 test('client controller does not swallow an update behind a status refresh', async () => {
@@ -135,9 +190,9 @@ test('client controller does not swallow an update behind a status refresh', asy
     requests.push([url, options.method])
     if (url === '/dsh-updater/status') {
       await refreshResponse
-      return { ok: true, status: 200, async json() { return { status: 'ready', updateAvailable: true } } }
+      return { ok: true, status: 200, async text() { return JSON.stringify({ status: 'ready', updateAvailable: true }) } }
     }
-    return { ok: true, status: 200, async json() { return { status: 'ready', updateAvailable: false, update: { status: 'succeeded' } } } }
+    return { ok: true, status: 200, async text() { return JSON.stringify({ status: 'ready', updateAvailable: false, update: { status: 'succeeded' } }) } }
   })
   const refreshing = controller.refresh()
   await Promise.resolve()
@@ -214,7 +269,7 @@ test('server-provided failed update state is not overwritten by a generic client
   const controller = plugin.createClientController(async () => ({
     ok: false,
     status: 500,
-    async json() { return { error: 'Update failed.', status: failed } },
+    async text() { return JSON.stringify({ error: 'Update failed.', status: failed }) },
   }))
   await controller.update()
   assert.deepEqual(controller.getSnapshot(), failed)

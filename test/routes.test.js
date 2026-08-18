@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { registerUpdaterRoutes } from '../lib/index.js'
+import { inject, registerUpdaterRoutes } from '../lib/index.js'
+
+test('updater waits for the Web server before applying', () => {
+  assert.deepEqual(inject, ['timer', 'webServer'])
+})
 
 function response() {
   const headers = {}
