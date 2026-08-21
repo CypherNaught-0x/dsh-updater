@@ -1,7 +1,7 @@
 {
   "name": "dsh-updater",
-  "version": "0.1.1",
-  "description": "Install-aware update notifications and one-click DSH updates for the Web profile",
+  "version": "0.2.0",
+  "description": "Install-aware DSH updates gated by isolated TUI and Web candidate tests",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -24,6 +24,7 @@
       "inject": [
         "@deepseek-ai/dsh-client-runtime",
         "@deepseek-ai/dsh-client-ui-layout",
+        "@deepseek-ai/dsh-client-ui-conversation",
         "@deepseek-ai/dsh-client-ui-sidebar",
         "@deepseek-ai/dsh-client-ui-settings",
         "@deepseek-ai/dsh-client-ui-slots"
@@ -32,7 +33,7 @@
     }
   },
   "scripts": {
-    "test": "node --check lib/index.js && node --check lib/client.js && node --test"
+    "test": "node --check lib/index.js && node --check lib/candidate.js && node --check lib/client.js && node --test"
   },
   "keywords": [
     "dsh",

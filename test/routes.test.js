@@ -38,10 +38,12 @@ test('web routes expose status and protect update mutations', async () => {
   }
   const state = { status: 'ready', updateAvailable: true }
   let checks = 0
+  let validations = 0
   let updates = 0
   const controller = {
     snapshot: () => state,
     async check() { checks += 1; return state },
+    async validate() { validations += 1; return state },
     async update() { updates += 1; return state },
   }
   const dispose = registerUpdaterRoutes(webServer, controller)
@@ -66,6 +68,13 @@ test('web routes expose status and protect update mutations', async () => {
   })
   assert.equal(accepted.res.statusCode, 200)
   assert.equal(checks, 1)
+
+  const validated = await invoke(routes.get('/dsh-updater/validate'), {
+    method: 'POST',
+    headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
+  })
+  assert.equal(validated.res.statusCode, 200)
+  assert.equal(validations, 1)
 
   const wrongMethod = await invoke(routes.get('/dsh-updater/status'), { method: 'POST' })
   assert.equal(wrongMethod.res.statusCode, 405)

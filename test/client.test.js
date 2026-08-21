@@ -22,6 +22,8 @@ function textOf(node) {
   return (node.children ?? []).map(textOf).join(' ')
 }
 
+let importSequence = 0
+
 async function loadClient() {
   let definition
   globalThis.window = {
@@ -30,7 +32,7 @@ async function loadClient() {
     },
   }
   try {
-    await import(`../lib/client.js?test=${Date.now()}`)
+    await import(`../lib/client.js?test=${++importSequence}`)
   } finally {
     delete globalThis.window
   }
@@ -117,7 +119,7 @@ test('client registers additive overlay, sidebar, and settings surfaces', async 
 test('client controller checks and updates through fixed same-origin routes', async () => {
   const { plugin } = await loadClient()
   const requests = []
-  const responses = [{ status: 'ready', updateAvailable: true }, { status: 'ready', updateAvailable: false, update: { status: 'succeeded' } }]
+  const responses = [{ updaterApiVersion: 3, status: 'ready', updateAvailable: true, validation: { status: 'passed' } }, { status: 'ready', updateAvailable: false, update: { status: 'succeeded' } }]
   const controller = plugin.createClientController(async (url, options) => {
     requests.push({ url, options })
     const value = responses.shift()
@@ -132,6 +134,123 @@ test('client controller checks and updates through fixed same-origin routes', as
   assert.equal(controller.getSnapshot().update.status, 'succeeded')
 })
 
+test('legacy Host API asks for a restart instead of reporting a blocked candidate', async () => {
+  const { plugin } = await loadClient()
+  const requests = []
+  const controller = plugin.createClientController(async (url, options) => {
+    requests.push([url, options.method])
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          updaterApiVersion: 2,
+          status: 'ready',
+          currentVersion: '1.0.0',
+          latestVersion: '2.0.0',
+          updateAvailable: true,
+          install: { canAutoUpdate: true },
+          validation: { status: 'blocked' },
+          update: { status: 'idle' },
+        })
+      },
+    }
+  })
+
+  await controller.refresh()
+  assert.equal(controller.getSnapshot().validation.status, 'restart-required')
+  await controller.validate()
+  assert.deepEqual(requests, [['/dsh-updater/status', 'GET']])
+  const overlay = textOf(plugin.UpdaterOverlay({ controller }))
+  assert.match(overlay, /Restart DSH to enable candidate testing/)
+  assert.doesNotMatch(overlay, /candidate is blocked|HTTP 405/i)
+  const action = plugin.UpdaterAction({ controller, wide: true })
+  assert.equal(action.props.disabled, true)
+  assert.match(textOf(action), /Restart DSH to enable candidate testing/)
+})
+
+test('missing validation route is treated as a Host restart requirement', async () => {
+  const { plugin } = await loadClient()
+  let requests = 0
+  const controller = plugin.createClientController(async () => {
+    requests += 1
+    if (requests === 1) return {
+      ok: true,
+      status: 200,
+      async text() { return JSON.stringify({ updaterApiVersion: 3, status: 'ready', currentVersion: '1.0.0', latestVersion: '2.0.0', updateAvailable: true, validation: { status: 'idle' } }) },
+    }
+    return { ok: false, status: 405, async text() { return '' } }
+  })
+  await controller.check()
+  await controller.validate()
+  assert.equal(controller.getSnapshot().validation.status, 'restart-required')
+  assert.equal(controller.getSnapshot().error, null)
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /Restart DSH to enable candidate testing/)
+})
+
+test('running validation displays the current staging phase', async () => {
+  const { plugin } = await loadClient()
+  const controller = plugin.createClientController(async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      return JSON.stringify({
+        updaterApiVersion: 3,
+        status: 'ready',
+        currentVersion: '1.0.0',
+        latestVersion: '2.0.0',
+        updateAvailable: true,
+        validation: { status: 'running', phase: 'install', message: 'Installing candidate dependencies; npm dependency resolution can take several minutes…', checks: [] },
+        update: { status: 'idle' },
+      })
+    },
+  }))
+  await controller.refresh()
+  assert.match(textOf(plugin.UpdaterOverlay({ controller })), /npm dependency resolution can take several minutes/)
+  assert.match(textOf(plugin.UpdaterSection({ controller })), /npm dependency resolution can take several minutes/)
+})
+
+test('blocked validation asks before placing a repair prompt in the model composer', async () => {
+  const { plugin } = await loadClient()
+  const prompts = []
+  const blocked = {
+    status: 'ready',
+    currentVersion: '1.0.0',
+    latestVersion: '2.0.0',
+    updateAvailable: true,
+    install: { canAutoUpdate: true },
+    validation: {
+      status: 'blocked',
+      target: '2.0.0',
+      candidatePath: '/tmp/candidate',
+      checks: [
+        { id: 'tui', label: 'TUI startup', status: 'failed', error: 'TUI exited early' },
+        { id: 'web', label: 'Web startup and HTTP response', status: 'passed' },
+      ],
+      blockingIssues: [{ check: 'tui', message: 'TUI exited early' }],
+      repairPrompt: 'Fix only the isolated candidate.',
+    },
+    update: { status: 'idle' },
+  }
+  const controller = plugin.createClientController(async (url) => {
+    assert.equal(url, '/dsh-updater/validate')
+    return { ok: true, status: 200, async text() { return JSON.stringify(blocked) } }
+  }, {
+    async promptModel(prompt) { prompts.push(prompt); return true },
+  })
+
+  const validating = controller.validate()
+  assert.equal(controller.getSnapshot().validation.status, 'running')
+  await validating
+  assert.equal(controller.getSnapshot().validation.status, 'blocked')
+  const section = textOf(plugin.UpdaterSection({ controller }))
+  assert.match(section, /TUI startup/)
+  assert.match(section, /Prompt a model to fix/)
+  assert.equal(prompts.length, 0)
+  assert.equal(await controller.promptModel(), true)
+  assert.deepEqual(prompts, ['Fix only the isolated candidate.'])
+})
+
 test('updates publish immediate progress before the Host operation completes', async () => {
   const { plugin } = await loadClient()
   let releaseUpdate
@@ -143,11 +262,13 @@ test('updates publish immediate progress before the Host operation completes', a
         status: 200,
         async text() {
           return JSON.stringify({
+            updaterApiVersion: 3,
             status: 'ready',
             currentVersion: '1.0.0',
             latestVersion: '1.0.1',
             updateAvailable: true,
             install: { canAutoUpdate: true, actionLabel: 'Update DSH' },
+            validation: { status: 'passed' },
             update: { status: 'idle' },
           })
         },
@@ -174,7 +295,7 @@ test('updates publish immediate progress before the Host operation completes', a
   const updating = controller.update()
   assert.equal(controller.getSnapshot().update.status, 'running')
   assert.match(textOf(plugin.UpdaterOverlay({ controller })), /This can take a few minutes/)
-  assert.match(textOf(plugin.UpdaterAction({ controller, wide: true })), /Updating DSH/)
+  assert.match(textOf(plugin.UpdaterAction({ controller, wide: true })), /Applying verified update/)
   assert.match(textOf(plugin.UpdaterSection({ controller })), /This can take a few minutes/)
 
   releaseUpdate()
@@ -190,11 +311,13 @@ test('update request failures replace progress with failure feedback', async () 
         status: 200,
         async text() {
           return JSON.stringify({
+            updaterApiVersion: 3,
             status: 'ready',
             currentVersion: '1.0.0',
             latestVersion: '1.0.1',
             updateAvailable: true,
             install: { canAutoUpdate: true },
+            validation: { status: 'passed' },
             update: { status: 'idle' },
           })
         },
@@ -270,7 +393,7 @@ test('client controller does not swallow an update behind a status refresh', asy
     requests.push([url, options.method])
     if (url === '/dsh-updater/status') {
       await refreshResponse
-      return { ok: true, status: 200, async text() { return JSON.stringify({ status: 'ready', updateAvailable: true }) } }
+      return { ok: true, status: 200, async text() { return JSON.stringify({ updaterApiVersion: 3, status: 'ready', updateAvailable: true, validation: { status: 'passed' } }) } }
     }
     return { ok: true, status: 200, async text() { return JSON.stringify({ status: 'ready', updateAvailable: false, update: { status: 'succeeded' } }) } }
   })
