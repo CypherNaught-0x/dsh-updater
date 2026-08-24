@@ -15,7 +15,7 @@ An install-aware update plugin for the DeepSeek Harness Web profile. It checks t
 - Offers a user-controlled repair prompt with the candidate path and bounded diagnostics; it places the prompt in the current conversation composer (or copies it) but never submits a model request automatically.
 - Reports check, validation, and update progress, successful completion, up-to-date results, and request failures immediately in the GUI.
 - Runs only fixed validation and update plans selected by the Host; the browser cannot submit commands or paths.
-- Rejects non-loopback requests and cross-origin update actions.
+- Rejects non-loopback transport and cross-origin update actions. Trusted loopback reverse proxies may allow exact browser origins with `DSH_UPDATER_TRUSTED_ORIGINS`; arbitrary rebound hostnames remain denied.
 - Refuses to pull a dirty, ahead, detached, or upstream-less source checkout.
 - Scrubs secret-bearing environment variables from update subprocesses and bounds retained output.
 

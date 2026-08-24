@@ -69,6 +69,28 @@ test('web routes expose status and protect update mutations', async () => {
   assert.equal(accepted.res.statusCode, 200)
   assert.equal(checks, 1)
 
+ const rebound = await invoke(routes.get('/dsh-updater/check'), {
+ method: 'POST',
+ headers: { host: 'evil.test', origin: 'https://evil.test' },
+ })
+ assert.equal(rebound.res.statusCode, 403)
+ assert.equal(checks, 1)
+
+ const trustedOriginsVariable = 'DSH_UPDATER_TRUSTED_ORIGINS'
+ const previousTrustedOrigins = process.env[trustedOriginsVariable]
+ process.env[trustedOriginsVariable] = 'https://dsh.example.test'
+ try {
+ const trusted = await invoke(routes.get('/dsh-updater/check'), {
+ method: 'POST',
+ headers: { host: 'dsh.example.test', origin: 'https://dsh.example.test' },
+ })
+ assert.equal(trusted.res.statusCode, 200)
+ assert.equal(checks, 2)
+ } finally {
+ if (previousTrustedOrigins === undefined) delete process.env[trustedOriginsVariable]
+ else process.env[trustedOriginsVariable] = previousTrustedOrigins
+ }
+
   const validated = await invoke(routes.get('/dsh-updater/validate'), {
     method: 'POST',
     headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
