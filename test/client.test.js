@@ -134,6 +134,39 @@ test('client controller checks and updates through fixed same-origin routes', as
   assert.equal(controller.getSnapshot().update.status, 'succeeded')
 })
 
+test('available updates show release notes before validation or application', async () => {
+  const { plugin } = await loadClient()
+  const controller = plugin.createClientController(async () => ({
+    ok: true,
+    status: 200,
+    async text() {
+      return JSON.stringify({
+        updaterApiVersion: 3,
+        status: 'ready',
+        currentVersion: '1.0.0',
+        latestVersion: '2.0.0',
+        latestTag: 'latest',
+        updateAvailable: true,
+        install: { kind: 'npm-global', label: 'npm global installation', canAutoUpdate: true },
+        changelog: {
+          source: 'github',
+          text: '## Bug fixes\n\n- Fixed authenticated Web startup.',
+          url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v2.0.0',
+        },
+        validation: { status: 'idle', checks: [], blockingIssues: [] },
+        update: { status: 'idle' },
+      })
+    },
+  }))
+  await controller.refresh()
+  for (const surface of [plugin.UpdaterOverlay({ controller }), plugin.UpdaterSection({ controller })]) {
+    const text = textOf(surface)
+    assert.match(text, /Changes in 2\.0\.0 — GitHub Releases/)
+    assert.match(text, /Fixed authenticated Web startup/)
+    assert.match(text, /View on GitHub Releases/)
+  }
+})
+
 test('legacy Host API asks for a restart instead of reporting a blocked candidate', async () => {
   const { plugin } = await loadClient()
   const requests = []

@@ -69,7 +69,7 @@ test('candidate environment isolates DSH state and does not inherit credentials'
   assert.equal(env.DEEPSEEK_API_KEY, undefined)
 })
 
-test('candidate Web probe completes the browser-token authentication flow', async () => {
+test('candidate Web probe uses the token URL instead of failing on the bare root 401', async () => {
   const requests = []
   const server = createServer((req, res) => {
     requests.push({ url: req.url, cookie: req.headers.cookie })

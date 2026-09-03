@@ -6,6 +6,7 @@ import test from 'node:test'
 import {
   classifyPackageInstall,
   createUpdaterController,
+  fetchLatestVersion,
   findSourceRoot,
   resolveDshPackageRoot,
   runCommand,
@@ -26,6 +27,22 @@ function releaseInfo(version, tag) {
     tag,
     integrity: 'sha512-AAAAAAAAAAAAAAAAAAAAAA==',
     tarball: `https://registry.example.test/${version}.tgz`,
+    changelog: { source: 'npm', text: `Changes in ${version}`, url: `https://registry.example.test/${version}` },
+  }
+}
+
+function registryMetadata(version, manifest = {}) {
+  return {
+    'dist-tags': { latest: version, next: version },
+    versions: {
+      [version]: {
+        ...manifest,
+        dist: {
+          integrity: 'sha512-AAAAAAAAAAAAAAAAAAAAAA==',
+          tarball: `https://registry.example.test/${version}.tgz`,
+        },
+      },
+    },
   }
 }
 
@@ -48,6 +65,48 @@ async function passingCandidate({ target }) {
     dispose() {},
   }
 }
+
+test('release discovery prefers changelog text published in npm metadata', async () => {
+  let githubRequests = 0
+  const release = await fetchLatestVersion('1.0.0', 'https://registry.example.test/', 5000, {
+    fetchRegistryMetadata: async () => registryMetadata('2.0.0', { releaseNotes: '## Added\n\n- npm notes' }),
+    fetchGithubRelease: async () => { githubRequests += 1; throw new Error('GitHub must not be called') },
+  })
+  assert.deepEqual(release.changelog, {
+    source: 'npm',
+    text: '## Added\n\n- npm notes',
+    url: 'https://www.npmjs.com/package/@deepseek-ai/dsh/v/2.0.0',
+  })
+  assert.equal(githubRequests, 0)
+})
+
+test('release discovery falls back to the matching GitHub Release', async () => {
+  const release = await fetchLatestVersion('1.0.0-rc.1', 'https://registry.example.test/', 5000, {
+    fetchRegistryMetadata: async () => registryMetadata('1.0.0-rc.2'),
+    fetchGithubRelease: async (version) => ({
+      source: 'github',
+      text: `Changes for ${version}`,
+      url: `https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v${version}`,
+    }),
+  })
+  assert.deepEqual(release.changelog, {
+    source: 'github',
+    text: 'Changes for 1.0.0-rc.2',
+    url: 'https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v1.0.0-rc.2',
+  })
+})
+
+test('unavailable optional changelog data does not block release discovery', async () => {
+  const release = await fetchLatestVersion('1.0.0', 'https://registry.example.test/', 5000, {
+    fetchRegistryMetadata: async () => registryMetadata('2.0.0'),
+    fetchGithubRelease: async () => { throw new Error('rate limited') },
+  })
+  assert.deepEqual(release.changelog, {
+    source: 'github',
+    text: null,
+    url: 'https://github.com/deepseek-ai/deepseek-harness/releases',
+  })
+})
 
 test('resolves the DSH manifest relative to the running entry', () => {
   const root = tempDir()
@@ -162,6 +221,7 @@ test('package controller chooses the prerelease channel and exact update target'
   assert.equal(checked.updateAvailable, true)
   assert.equal(checked.updaterApiVersion, 3)
   assert.equal(checked.latestTag, 'next')
+  assert.deepEqual(checked.changelog, { source: 'npm', text: 'Changes in 1.0.0-rc.2', url: 'https://registry.example.test/1.0.0-rc.2' })
   assert.equal(checked.install.commandPreview, 'npm install --global @deepseek-ai/dsh@1.0.0-rc.2')
   assert.equal((await controller.validate()).validation.status, 'passed')
   const updated = await controller.update()
