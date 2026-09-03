@@ -1,7 +1,7 @@
 {
   "name": "dsh-updater",
-  "version": "0.2.1",
-  "description": "Install-aware DSH updates gated by isolated TUI and Web candidate tests",
+  "version": "0.3.0",
+  "description": "End-to-end DSH update recovery gated by isolated candidate tests",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {

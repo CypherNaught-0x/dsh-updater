@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
-import { isolatedEnvironment, runStartupSmoke, targetFingerprint, validateCandidate, verifyFileIntegrity } from '../lib/candidate.js'
+import { isolatedEnvironment, repairPrompt, requestOk, runStartupSmoke, targetFingerprint, validateCandidate, verifyFileIntegrity } from '../lib/candidate.js'
 
 test('candidate startup smoke waits for readiness and terminates the isolated process', async () => {
   const script = [
@@ -68,6 +69,67 @@ test('candidate environment isolates DSH state and does not inherit credentials'
   assert.equal(env.DEEPSEEK_API_KEY, undefined)
 })
 
+test('candidate Web probe completes the browser-token authentication flow', async () => {
+  const requests = []
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url, cookie: req.headers.cookie })
+    if (req.url === '/?token=secret') {
+      res.writeHead(303, { location: '/', 'set-cookie': 'dsh-browser-auth=session; Path=/; HttpOnly' })
+      res.end()
+    } else if (req.url === '/' && req.headers.cookie === 'dsh-browser-auth=session') {
+      res.writeHead(200, { 'content-type': 'text/html' })
+      res.end('<!doctype html>')
+    } else {
+      res.writeHead(401)
+      res.end()
+    }
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.notEqual(address, null)
+    assert.equal(typeof address, 'object')
+    await requestOk(`http://127.0.0.1:${address.port}/?token=secret`, 5000)
+    assert.deepEqual(requests, [
+      { url: '/?token=secret', cookie: undefined },
+      { url: '/', cookie: 'dsh-browser-auth=session' },
+    ])
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+test('repair prompt owns local recovery through the running target version', () => {
+  const prompt = repairPrompt({
+    target: '2.0.0',
+    candidatePath: '/tmp/dsh-candidate',
+    checks: [{ id: 'web', label: 'Web startup', status: 'failed', error: 'HTTP 401' }],
+  }, {
+    version: '1.0.0',
+    kind: 'pnpm-global',
+    packageRoot: '/opt/dsh',
+    commandPreview: 'pnpm add --global @deepseek-ai/dsh@2.0.0',
+    restartHint: 'Restart DSH.',
+  })
+  assert.match(prompt, /Currently running DSH version: 1\.0\.0/)
+  assert.match(prompt, /local DSH configuration[\s\S]*installed or linked plugin/)
+  assert.match(prompt, /new DSH version itself is defective/)
+  assert.match(prompt, /apply it to the actual installation/)
+  assert.match(prompt, /Restart the same DSH service\/process/)
+  assert.match(prompt, /currently running DSH—not merely the files on disk/)
+  assert.match(prompt, /Rerun the updater check so it discovers that authoritative replacement/)
+  assert.doesNotMatch(prompt, /Do not update the active installation/)
+
+  const sourcePrompt = repairPrompt({ target: 'a'.repeat(40), checks: [] }, {
+    version: '2.0.0',
+    kind: 'source',
+    sourceRoot: '/repo',
+  })
+  assert.match(sourcePrompt, /Available update commit: a{40}/)
+  assert.match(sourcePrompt, /updater Running commit equals the validated target commit/)
+  assert.match(sourcePrompt, /`dsh --version` equals the package version built at that commit/)
+})
+
 test('package validation stages the exact target and runs both candidate modes', async () => {
   const startups = []
   const progress = []
@@ -125,6 +187,7 @@ test('package validation stages the exact target and runs both candidate modes',
   assert.equal(startups[0].options.readyPattern.test('rendered tui frame'), true)
   assert.equal(startups[0].options.readyPattern.test('   '), false)
   assert.deepEqual(startups[1].args.slice(-6), ['web', '--host', '127.0.0.1', '--port', '0', '--no-open'])
+  assert.equal(startups[1].options.readyPattern.exec('dsh web: http://127.0.0.1:3080/?token=secret')?.[1], 'http://127.0.0.1:3080/?token=secret')
   assert.equal(startups.every(entry => entry.options.env.DSH_HOME.startsWith(stagedRoot)), true)
   assert.equal(existsSync(stagedRoot), true)
   outcome.dispose()

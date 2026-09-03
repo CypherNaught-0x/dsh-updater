@@ -245,7 +245,7 @@ test('blocked validation asks before placing a repair prompt in the model compos
   assert.equal(controller.getSnapshot().validation.status, 'blocked')
   const section = textOf(plugin.UpdaterSection({ controller }))
   assert.match(section, /TUI startup/)
-  assert.match(section, /Prompt a model to fix/)
+  assert.match(section, /Ask AI to finish update/)
   assert.equal(prompts.length, 0)
   assert.equal(await controller.promptModel(), true)
   assert.deepEqual(prompts, ['Fix only the isolated candidate.'])

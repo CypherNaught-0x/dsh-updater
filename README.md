@@ -1,6 +1,6 @@
 # dsh-updater
 
-An install-aware update plugin for the DeepSeek Harness Web profile. It checks the release source that matches the running DSH installation, tests the exact candidate separately in every supported TUI/Web mode, and enables the update only after that gate passes.
+An install-aware update plugin for the DeepSeek Harness Web profile. It checks the release source that matches the running DSH installation, tests the exact candidate separately in every supported TUI/Web mode, and provides an AI recovery handoff whose finish line is the newly available version running locally.
 
 ## Features
 
@@ -10,9 +10,9 @@ An install-aware update plugin for the DeepSeek Harness Web profile. It checks t
 - Uses the source checkout's configured Git upstream for source runs.
 - Shows an update banner in `shell.overlay`, a persistent sidebar footer action, and a complete **Settings → DSH Updater** page.
 - Stages each candidate outside the active installation and runs blocking startup checks in every TUI/Web mode the release actually provides before enabling the update action.
-- Starts Web on loopback port `0`, waits for the settled `dsh web:` URL, verifies its root response, and shuts the candidate process down cleanly.
+- Starts Web on loopback port `0`, waits for the settled `dsh web:` URL, verifies its browser-token exchange and authenticated root response, and shuts the candidate process down cleanly.
 - Reports a TUI profile omitted by the release as **Not shipped**; a present-but-crashing TUI, failed candidate install/build, or failed Web startup remains blocking and leaves the active installation unchanged.
-- Offers a user-controlled repair prompt with the candidate path and bounded diagnostics; it places the prompt in the current conversation composer (or copies it) but never submits a model request automatically.
+- Offers a user-controlled AI recovery prompt with the candidate path, installation context, and bounded diagnostics; the agent is directed to fix local configuration or plugin compatibility first, escalate to a DSH release fix only when necessary, apply the working update, restart DSH, and verify the new version is actually running.
 - Reports check, validation, and update progress, successful completion, up-to-date results, and request failures immediately in the GUI.
 - Runs only fixed validation and update plans selected by the Host; the browser cannot submit commands or paths.
 - Rejects non-loopback transport and cross-origin update actions. Trusted loopback reverse proxies may allow exact browser origins with `DSH_UPDATER_TRUSTED_ORIGINS`; arbitrary rebound hostnames remain denied.
@@ -49,12 +49,12 @@ An available release is no longer applied immediately. The workflow is:
 1. **Test candidate** downloads the registry tarball, verifies its published integrity digest, and installs that local archive in a private temporary prefix. Source candidates clone the checkout without hardlinks, detach at the exact fetched 40-character commit, and run `pnpm install --frozen-lockfile` plus `pnpm run build` only inside that clone. The GUI reports the active stage while package dependency resolution runs, which can take several minutes on a cold npm cache.
 2. The candidate runs with fresh `HOME`, `DSH_HOME`, and `DSH_AGENTS_HOME` directories and without inherited API keys, tokens, passwords, or the active session database.
 3. When the release provides a TUI profile, the TUI check starts the real candidate with `dsh --profile tui` and requires non-empty terminal output plus a bounded period in which the process remains alive before controlled shutdown. A specifically reported absent profile is shown as **Not shipped**; any other early exit or silent hang blocks the update.
-4. The Web check starts the real candidate with `dsh web --host 127.0.0.1 --port 0`, waits for its settled URL, requests that URL, and requires an HTTP success response.
+4. The Web check starts the real candidate with `dsh web --host 127.0.0.1 --port 0`, waits for its complete browser-token URL, exchanges the token for the session cookie, and requires the authenticated root to return HTTP 200.
 5. Only a passing result for the exact tarball integrity or source commit enables **Apply verified update**. Package-manager promotion consumes the same verified local archive; source promotion fast-forwards only to the validated commit. A changed target or digest invalidates the previous pass.
 
 Current DSH releases ship built-in Web and headless profiles but no built-in TUI profile. The updater records that exact launcher result as **Not shipped** rather than claiming a TUI pass or permanently blocking otherwise valid Web-only releases. If a future candidate supplies a real `tui` profile, that process must pass the startup smoke.
 
-When validation is blocked, the settings page shows the TUI/Web matrix and an optional **Prompt a model to fix** action. The action asks for confirmation through the button gesture, then places a bounded repair prompt in the current conversation composer; if no conversation is available, it copies the prompt when clipboard access is available. The prompt directs the model to leave the active installation untouched. Revalidation always stages the authoritative release again, so local edits to a downloaded package are diagnostic only and cannot silently become the installed version.
+When validation is blocked, the settings page shows the TUI/Web matrix and an optional **Ask AI to finish update** action. The action asks for confirmation through the button gesture, then places a bounded recovery prompt in the current conversation composer; if no conversation is available, it copies the prompt when clipboard access is available. The agent owns the update end to end: diagnose local configuration, profile, updater, and plugin compatibility before blaming the release; publish and rediscover a replacement only when the candidate itself is defective; apply the working target to the installation that owns the running process; restart DSH; and confirm the running version matches the selected package version or validated source commit. Placing the prompt transfers the task but does not mark recovery complete. Revalidation always stages the authoritative release again, so local edits to a downloaded package remain diagnostic only.
 
 ## Supported update plans
 
@@ -73,7 +73,7 @@ When validation is blocked, the settings page shows the TUI/Web matrix and an op
 
 Yarn and Bun work through the published npm package metadata but are not first-class DSH installation methods. An unrecognized package layout remains checkable but the plugin will not guess an update command.
 
-An update changes files on disk; the currently running Node process is not replaced. Restart DSH after a successful update. The `npx` action prepares the release in npm's execution cache because an ephemeral invocation has no durable installation to replace.
+The normal **Apply verified update** action changes files on disk; the currently running Node process is not replaced, so restart DSH afterward. An AI recovery handoff has a stricter finish line: it must carry the operation through that restart and verify the updater's **Running** value and `dsh --version` match the selected target. The `npx` action prepares the release in npm's execution cache because an ephemeral invocation has no durable installation to replace.
 
 ## Source checkout safety
 
@@ -146,7 +146,7 @@ dsh-updater/
 ├── lib/
 │   ├── index.js     # Host detection, gate state, update plans, and HTTP endpoints
 │   ├── candidate.js # Isolated staging plus TUI/Web startup smoke checks
-│   └── client.js    # Overlay, sidebar action, settings page, and repair prompt UX
+│   └── client.js    # Overlay, sidebar action, settings page, and AI recovery UX
 ├── test/
 ├── cordis.patch.yml
 └── package.json
