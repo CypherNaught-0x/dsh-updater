@@ -99,6 +99,76 @@ test('candidate Web probe uses the token URL instead of failing on the bare root
   }
 })
 
+test('candidate Web probe accepts the relative ./ redirect emitted by newer DSH releases', async () => {
+  const requests = []
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url, cookie: req.headers.cookie })
+    if (req.url === '/?token=secret') {
+      // dsh-client-connection 0.1.7-alpha.2 answers the token exchange with the
+      // RFC 9110 relative form `location: ./`, not the older absolute `/`.
+      res.writeHead(303, { location: './', 'set-cookie': 'dsh-browser-auth=session; Path=/; HttpOnly' })
+      res.end()
+    } else if (req.url === '/' && req.headers.cookie === 'dsh-browser-auth=session') {
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
+      res.end('<!doctype html><html><body>dsh</body></html>')
+    } else {
+      res.writeHead(401)
+      res.end()
+    }
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.notEqual(address, null)
+    assert.equal(typeof address, 'object')
+    await requestOk(`http://127.0.0.1:${address.port}/?token=secret`, 5000)
+    assert.deepEqual(requests, [
+      { url: '/?token=secret', cookie: undefined },
+      { url: '/', cookie: 'dsh-browser-auth=session' },
+    ])
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+test('candidate Web probe rejects a token exchange that redirects outside the candidate origin', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(303, { location: 'http://127.0.0.2:1/', 'set-cookie': 'dsh-browser-auth=session; Path=/; HttpOnly' })
+    res.end()
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.notEqual(address, null)
+    assert.equal(typeof address, 'object')
+    await assert.rejects(
+      requestOk(`http://127.0.0.1:${address.port}/?token=secret`, 5000),
+      /redirected outside the candidate origin/,
+    )
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+})
+
+test('candidate Web probe still rejects an exchange without a session cookie', async () => {
+  const server = createServer((req, res) => {
+    res.writeHead(303, { location: './' })
+    res.end()
+  })
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+  try {
+    const address = server.address()
+    assert.notEqual(address, null)
+    assert.equal(typeof address, 'object')
+    await assert.rejects(
+      requestOk(`http://127.0.0.1:${address.port}/?token=secret`, 5000),
+      /without the expected redirect and cookie/,
+    )
+  } finally {
+    await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()))
+  }
+})
+
 test('repair prompt owns local recovery through the running target version', () => {
   const prompt = repairPrompt({
     target: '2.0.0',
