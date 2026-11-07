@@ -22,6 +22,16 @@ function textOf(node) {
   return (node.children ?? []).map(textOf).join(' ')
 }
 
+function findNode(node, predicate) {
+  if (node === null || node === undefined || typeof node !== 'object') return undefined
+  if (predicate(node)) return node
+  for (const child of node.children ?? []) {
+    const found = findNode(child, predicate)
+    if (found !== undefined) return found
+  }
+  return undefined
+}
+
 let importSequence = 0
 
 async function loadClient() {
@@ -132,6 +142,94 @@ test('client controller checks and updates through fixed same-origin routes', as
     ['/dsh-updater/update', 'POST'],
   ])
   assert.equal(controller.getSnapshot().update.status, 'succeeded')
+})
+
+test('settings dropdown shows cumulative choices and persists through a fixed Host route', async () => {
+  const { plugin } = await loadClient()
+  const requests = []
+  const controller = plugin.createClientController(async (url, options) => {
+    requests.push([url, options.method])
+    const releaseEligibility = url.endsWith('/alpha') ? 'alpha' : 'beta'
+    return {
+      ok: true,
+      status: 200,
+      async text() {
+        return JSON.stringify({
+          updaterApiVersion: 4,
+          releaseEligibility,
+          status: 'ready',
+          currentVersion: '1.0.0',
+          latestVersion: '1.0.0',
+          updateAvailable: false,
+          validation: { status: 'idle', checks: [], blockingIssues: [] },
+          update: { status: 'idle' },
+        })
+      },
+    }
+  })
+  await controller.refresh()
+  const section = plugin.UpdaterSection({ controller })
+  const select = findNode(section, node => node.type === 'select' && node.props.id === 'dsh-updater-release-eligibility')
+  assert.equal(select.props.value, 'beta')
+  assert.deepEqual(select.children.map(option => textOf(option)), [
+    'Stable only',
+    'Stable + RC',
+    'Stable + RC + Beta',
+    'All including Alpha',
+  ])
+  assert.match(textOf(section), /unknown prerelease labels are never selected/)
+
+  await controller.setReleaseEligibility('alpha')
+  assert.deepEqual(requests, [
+    ['/dsh-updater/status', 'GET'],
+    ['/dsh-updater/release-eligibility/alpha', 'POST'],
+  ])
+  assert.equal(controller.getSnapshot().releaseEligibility, 'alpha')
+  assert.equal(controller.getSnapshot().releaseEligibilityStatus.status, 'saved')
+})
+
+test('missing eligibility Host route asks for a restart instead of showing HTTP 404 or 405', async () => {
+  const { plugin } = await loadClient()
+  for (const missingStatus of [404, 405]) {
+    const controller = plugin.createClientController(async (url) => {
+      if (url === '/dsh-updater/status') {
+        return {
+          ok: true,
+          status: 200,
+          async text() {
+            return JSON.stringify({
+              updaterApiVersion: 3,
+              status: 'ready',
+              currentVersion: 'v0.1.7-alpha.2',
+              installedVersion: 'v0.1.7-alpha.2',
+              releaseEligibility: 'stable',
+              updateAvailable: false,
+              validation: { status: 'idle', checks: [], blockingIssues: [] },
+              update: { status: 'idle' },
+            })
+          },
+        }
+      }
+      assert.equal(url, '/dsh-updater/release-eligibility/alpha')
+      return { ok: false, status: missingStatus, async text() { return '' } }
+    })
+
+    await controller.refresh()
+    await controller.setReleaseEligibility('alpha')
+    const state = controller.getSnapshot()
+    assert.equal(state.currentVersion, 'v0.1.7-alpha.2')
+    assert.equal(state.error, null)
+    assert.equal(state.releaseEligibility, 'stable')
+    assert.equal(state.releaseEligibilityStatus.status, 'restart-required')
+    assert.match(state.releaseEligibilityStatus.error, /Restart DSH to activate release eligibility settings/)
+    assert.doesNotMatch(state.releaseEligibilityStatus.error, /HTTP (?:404|405)/)
+
+    const section = plugin.UpdaterSection({ controller })
+    const select = findNode(section, node => node.type === 'select' && node.props.id === 'dsh-updater-release-eligibility')
+    assert.equal(select.props.disabled, true)
+    assert.match(textOf(section), /Restart DSH to activate release eligibility settings/)
+    assert.doesNotMatch(textOf(section), /HTTP (?:404|405)/)
+  }
 })
 
 test('available updates show release notes before validation or application', async () => {
@@ -508,5 +606,9 @@ test('server-provided failed update state is not overwritten by a generic client
     async text() { return JSON.stringify({ error: 'Update failed.', status: failed }) },
   }))
   await controller.update()
-  assert.deepEqual(controller.getSnapshot(), failed)
+  assert.deepEqual(controller.getSnapshot(), {
+    ...failed,
+    releaseEligibility: 'stable',
+    releaseEligibilityStatus: { status: 'idle', error: null },
+  })
 })

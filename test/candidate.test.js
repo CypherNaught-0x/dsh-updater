@@ -322,4 +322,5 @@ test('validation fingerprint binds a pass to installation kind and exact target'
   assert.notEqual(npm, targetFingerprint({ kind: 'pnpm-global', candidateIntegrity: 'sha512-first' }, '2.0.0'))
   assert.notEqual(npm, targetFingerprint({ kind: 'npm-global', candidateIntegrity: 'sha512-first' }, '2.0.1'))
   assert.notEqual(npm, targetFingerprint({ kind: 'npm-global', candidateIntegrity: 'sha512-second' }, '2.0.0'))
+  assert.notEqual(npm, targetFingerprint({ kind: 'npm-global', candidateIntegrity: 'sha512-first', releaseEligibility: 'alpha' }, '2.0.0'))
 })

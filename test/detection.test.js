@@ -1,14 +1,17 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, symlinkSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
 import {
   classifyPackageInstall,
+  createReleaseEligibilityStore,
   createUpdaterController,
   fetchLatestVersion,
   findSourceRoot,
+  isReleaseEligible,
   resolveDshPackageRoot,
+  selectLatestEligibleVersion,
   runCommand,
   scrubEnvironment,
 } from '../lib/index.js'
@@ -83,6 +86,7 @@ test('release discovery prefers changelog text published in npm metadata', async
 test('release discovery falls back to the matching GitHub Release', async () => {
   const release = await fetchLatestVersion('1.0.0-rc.1', 'https://registry.example.test/', 5000, {
     fetchRegistryMetadata: async () => registryMetadata('1.0.0-rc.2'),
+    releaseEligibility: 'rc',
     fetchGithubRelease: async (version) => ({
       source: 'github',
       text: `Changes for ${version}`,
@@ -106,6 +110,72 @@ test('unavailable optional changelog data does not block release discovery', asy
     text: null,
     url: 'https://github.com/deepseek-ai/deepseek-harness/releases',
   })
+})
+
+test('release eligibility is cumulative, semver-ordered, and rejects unknown prerelease classes', () => {
+  const metadata = {
+    versions: Object.fromEntries([
+      '2.0.0',
+      '3.0.0-rc.10',
+      '3.0.0-rc.2',
+      '3.0.0-beta.10',
+      '3.0.0-beta.2',
+      '3.0.0-alpha.10',
+      '3.0.0-alpha.2',
+      '4.0.0-next.1',
+      '5.0.0-preview.1',
+    ].map(version => [version, {}])),
+  }
+  assert.equal(selectLatestEligibleVersion(metadata, 'stable'), '2.0.0')
+  assert.equal(selectLatestEligibleVersion(metadata, 'rc'), '3.0.0-rc.10')
+  assert.equal(selectLatestEligibleVersion(metadata, 'beta'), '3.0.0-rc.10')
+  assert.equal(selectLatestEligibleVersion(metadata, 'alpha'), '3.0.0-rc.10')
+  assert.equal(isReleaseEligible('3.0.0-alpha.10', 'alpha'), true)
+  assert.equal(selectLatestEligibleVersion({ versions: { '3.0.0-alpha.2': {}, '3.0.0-alpha.10': {} } }, 'alpha'), '3.0.0-alpha.10')
+  assert.equal(isReleaseEligible('4.0.0-next.1', 'alpha'), false)
+  assert.equal(isReleaseEligible('5.0.0-preview.1', 'alpha'), false)
+})
+
+test('release discovery selects the highest eligible npm version rather than trusting dist-tags', async () => {
+  const versions = ['1.5.0', '2.0.0-alpha.2', '2.0.0-alpha.10', '2.0.0-beta.1', '2.0.0-rc.1', '3.0.0-next.1']
+  const metadata = {
+    'dist-tags': { latest: '1.0.0', next: '3.0.0-next.1' },
+    versions: Object.fromEntries(versions.map(version => [version, {
+      releaseNotes: `Changes in ${version}`,
+      dist: {
+        integrity: 'sha512-AAAAAAAAAAAAAAAAAAAAAA==',
+        tarball: `https://registry.example.test/${version}.tgz`,
+      },
+    }])),
+  }
+  for (const [releaseEligibility, expected] of [
+    ['stable', '1.5.0'],
+    ['rc', '2.0.0-rc.1'],
+    ['beta', '2.0.0-rc.1'],
+    ['alpha', '2.0.0-rc.1'],
+  ]) {
+    const release = await fetchLatestVersion('1.0.0', 'https://registry.example.test/', 5000, {
+      releaseEligibility,
+      fetchRegistryMetadata: async () => metadata,
+    })
+    assert.equal(release.version, expected)
+    assert.equal(release.tag, releaseEligibility)
+  }
+})
+
+test('release eligibility persists with a conservative fallback for invalid data', () => {
+  const root = tempDir()
+  const file = join(root, 'settings', 'updater.json')
+  try {
+    const store = createReleaseEligibilityStore(file)
+    assert.equal(store.read(), 'stable')
+    assert.equal(store.write('beta'), 'beta')
+    assert.equal(createReleaseEligibilityStore(file).read(), 'beta')
+    writeFileSync(file, '{"releaseEligibility":"nightly"}\n')
+    assert.equal(createReleaseEligibilityStore(file).read(), 'stable')
+  } finally {
+    rmSync(root, { recursive: true, force: true })
+  }
 })
 
 test('resolves the DSH manifest relative to the running entry', () => {
@@ -191,6 +261,7 @@ test('recognizes a source checkout only from repository markers', () => {
 test('package controller chooses the prerelease channel and exact update target', async () => {
   const commands = []
   const controller = createUpdaterController({
+    releaseEligibility: 'rc',
     locate: () => ({
       kind: 'npm-global',
       label: 'npm global installation',
@@ -219,7 +290,7 @@ test('package controller chooses the prerelease channel and exact update target'
   controller.initialize()
   const checked = await controller.check()
   assert.equal(checked.updateAvailable, true)
-  assert.equal(checked.updaterApiVersion, 3)
+  assert.equal(checked.updaterApiVersion, 4)
   assert.equal(checked.latestTag, 'next')
   assert.deepEqual(checked.changelog, { source: 'npm', text: 'Changes in 1.0.0-rc.2', url: 'https://registry.example.test/1.0.0-rc.2' })
   assert.equal(checked.install.commandPreview, 'npm install --global @deepseek-ai/dsh@1.0.0-rc.2')
@@ -233,6 +304,65 @@ test('package controller chooses the prerelease channel and exact update target'
   assert.equal(updated.updateAvailable, false)
   assert.equal(updated.currentVersion, '1.0.0-rc.1')
   assert.equal(updated.installedVersion, '1.0.0-rc.2')
+})
+
+test('changing release eligibility discards stale validation and rediscovers before promotion', async () => {
+  const writes = []
+  let disposals = 0
+  const controller = createUpdaterController({
+    releaseEligibility: 'alpha',
+    releaseEligibilityStore: { read: () => 'alpha', write(value) { writes.push(value); return value } },
+    locate: () => ({
+      kind: 'npm-global',
+      label: 'npm global installation',
+      packageRoot: '/opt/dsh',
+      version: '1.0.0',
+      canAutoUpdate: true,
+      template: { program: 'npm', args: ['install', '--global', '{target}'] },
+    }),
+    fetchLatest: async (_current, _registry, _timeout, { releaseEligibility }) => releaseEligibility === 'stable'
+      ? releaseInfo('1.5.0', 'stable')
+      : releaseInfo('2.0.0-alpha.10', 'alpha'),
+    validateCandidate: async options => {
+      const outcome = await passingCandidate(options)
+      outcome.dispose = () => { disposals += 1 }
+      return outcome
+    },
+    verifyCandidateArtifact() {},
+  })
+  controller.initialize()
+  const validated = await controller.validate()
+  assert.equal(validated.latestVersion, '2.0.0-alpha.10')
+  assert.equal(validated.validation.status, 'passed')
+
+  const narrowed = await controller.setReleaseEligibility('stable')
+  assert.deepEqual(writes, ['stable'])
+  assert.equal(disposals, 1)
+  assert.equal(narrowed.releaseEligibility, 'stable')
+  assert.equal(narrowed.latestVersion, '1.5.0')
+  assert.equal(narrowed.validation.status, 'idle')
+  await assert.rejects(controller.update(), error => error?.code === 'NOT_VALIDATED')
+
+  const broadened = await controller.setReleaseEligibility('alpha')
+  assert.deepEqual(writes, ['stable', 'alpha'])
+  assert.equal(broadened.latestVersion, '2.0.0-alpha.10')
+  assert.equal(broadened.validation.status, 'idle')
+})
+
+test('controller rejects an ineligible package candidate even from a faulty discovery adapter', async () => {
+  const controller = createUpdaterController({
+    releaseEligibility: 'stable',
+    locate: () => ({
+      kind: 'npm-global',
+      packageRoot: '/opt/dsh',
+      version: '1.0.0',
+      canAutoUpdate: true,
+      template: { program: 'npm', args: ['install', '--global', '{target}'] },
+    }),
+    fetchLatest: async () => releaseInfo('2.0.0-preview.1', 'preview'),
+  })
+  controller.initialize()
+  await assert.rejects(controller.check(), /not eligible for Stable only/)
 })
 
 test('package promotion rechecks the verified archive and blocks a mutated artifact', async () => {
@@ -378,6 +508,7 @@ test('package verification reports the version actually left on disk after failu
 test('npx updates prepare an exact release without pretending the running process changed', async () => {
   let executions = 0
   const controller = createUpdaterController({
+    releaseEligibility: 'rc',
     locate: () => ({
       kind: 'npx',
       label: 'npm exec / npx cache',
@@ -409,6 +540,43 @@ test('npx updates prepare an exact release without pretending the running proces
   assert.equal(executions, 1)
 })
 
+test('source discovery hides upstream commits with an ineligible or unknown prerelease class', async () => {
+  const outputs = new Map([
+    ['git status --porcelain', ''],
+    ['git fetch --quiet --no-tags origin main', ''],
+    ['git rev-list --left-right --count HEAD...FETCH_HEAD', '0\t1'],
+    ['git rev-parse --short=12 FETCH_HEAD', 'bbbbbbbbbbbb'],
+    ['git rev-parse FETCH_HEAD', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+    ['git show FETCH_HEAD:apps/cli/package.json', '{"version":"2.0.0-nightly.1"}'],
+    ['git rev-parse --short=12 HEAD', 'aaaaaaaaaaaa'],
+    ['git rev-parse HEAD', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
+  ])
+  const controller = createUpdaterController({
+    releaseEligibility: 'alpha',
+    locate: () => ({
+      kind: 'source',
+      label: 'Git source checkout',
+      packageRoot: '/repo/apps/cli',
+      sourceRoot: '/repo',
+      version: '1.0.0',
+      branch: 'main',
+      upstream: 'origin/main',
+      remote: 'origin',
+      remoteBranch: 'main',
+      canAutoUpdate: true,
+    }),
+    sourceRepairMarker: { exists: () => false, create() {}, clear() {} },
+    runCommand: async (program, args) => ({ code: 0, signal: null, output: outputs.get(`${program} ${args.join(' ')}`) ?? '' }),
+  })
+  controller.initialize()
+  const checked = await controller.check()
+  assert.equal(checked.updateAvailable, false)
+  assert.equal(checked.latestVersion, '1.0.0')
+  assert.equal(checked.install.latestRef, 'aaaaaaaaaaaa')
+  assert.equal(checked.install.latestCommit, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa')
+  assert.equal(checked.install.canAutoUpdate, false)
+})
+
 test('source controller refuses automatic updates for dirty or ahead checkouts', async () => {
   const outputs = new Map([
     ['git status --porcelain', ' M package.json'],
@@ -416,6 +584,7 @@ test('source controller refuses automatic updates for dirty or ahead checkouts',
     ['git rev-list --left-right --count HEAD...FETCH_HEAD', '1\t2'],
     ['git rev-parse --short=12 FETCH_HEAD', 'bbbbbbbbbbbb'],
     ['git rev-parse FETCH_HEAD', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+    ['git show FETCH_HEAD:apps/cli/package.json', '{"version":"2.0.0"}'],
     ['git rev-parse --short=12 HEAD', 'aaaaaaaaaaaa'],
     ['git rev-parse HEAD', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'],
   ])
@@ -484,6 +653,7 @@ test('source update retries install and build without pulling twice after a part
       }
       if (command === 'git rev-parse --short=12 FETCH_HEAD') return { code: 0, signal: null, output: 'bbbbbbbbbbbb' }
       if (command === 'git rev-parse FETCH_HEAD') return { code: 0, signal: null, output: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
+      if (command === 'git show FETCH_HEAD:apps/cli/package.json') return { code: 0, signal: null, output: '{"version":"2.0.0"}' }
       if (command === 'git rev-parse --short=12 HEAD') return { code: 0, signal: null, output: pulls === 0 ? 'aaaaaaaaaaaa' : 'bbbbbbbbbbbb' }
       if (command === 'git rev-parse HEAD') return { code: 0, signal: null, output: pulls === 0 ? 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' : 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' }
       if (command === 'git merge --ff-only bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb') {
@@ -530,6 +700,7 @@ test('durable source marker restores repair state after controller restart', asy
     ['git rev-list --left-right --count HEAD...FETCH_HEAD', '0\t0'],
     ['git rev-parse --short=12 FETCH_HEAD', 'bbbbbbbbbbbb'],
     ['git rev-parse FETCH_HEAD', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
+    ['git show FETCH_HEAD:apps/cli/package.json', '{"version":"2.0.0"}'],
     ['git rev-parse --short=12 HEAD', 'bbbbbbbbbbbb'],
     ['git rev-parse HEAD', 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'],
   ])

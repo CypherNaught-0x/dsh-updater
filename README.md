@@ -6,8 +6,9 @@ An install-aware update plugin for the DeepSeek Harness Web profile. It checks t
 
 - Detects the DSH package and version from the running CLI entry instead of the working directory.
 - Recognizes `npx`, global and project-local npm/pnpm/Yarn/Bun installs, and Git source checkouts.
-- Uses the npm `latest` dist-tag for stable installations and `next` for prerelease installations.
-- Uses the source checkout's configured Git upstream for source runs.
+- Selects the highest npm version allowed by the persisted cumulative release eligibility: **Stable only** (default), **Stable + RC**, **Stable + RC + Beta**, or **All including Alpha**.
+- Uses the source checkout's configured Git upstream for source runs and applies the same release eligibility to the fetched commit's DSH package version.
+- Rejects unrecognized prerelease classes such as `next`, `preview`, or `nightly` even in the broadest setting.
 - Shows release notes before validation or application, preferring changelog fields in the selected npm version metadata and falling back to the matching [DeepSeek Harness GitHub Release](https://github.com/deepseek-ai/deepseek-harness/releases).
 - Shows an update banner in `shell.overlay`, a persistent sidebar footer action, and a complete **Settings → DSH Updater** page.
 - Stages each candidate outside the active installation and runs blocking startup checks in every TUI/Web mode the release actually provides before enabling the update action.
@@ -41,7 +42,7 @@ After publication:
 dsh plugin --profile web add dsh-updater
 ```
 
-Restart `dsh web`, then refresh the browser. The updater appears above Settings in the sidebar and as **Settings → DSH Updater**. A client hot reload can arrive before the Host routes after upgrading this plugin; in that case the UI asks for a DSH restart and never reports the missing route as a candidate failure.
+Restart `dsh web`, then refresh the browser. The updater appears above Settings in the sidebar and as **Settings → DSH Updater**. A client hot reload can arrive before the Host routes after upgrading this plugin; in that case candidate validation and release eligibility controls ask for a DSH restart instead of reporting the missing Host route as an update or settings failure.
 
 ## Candidate validation gate
 
@@ -62,16 +63,16 @@ When validation is blocked, the settings page shows the TUI/Web matrix and an op
 
 | Detected installation | Check source | Action after candidate validation |
 | --- | --- | --- |
-| `npx` / `npm exec` cache | npm `latest` or `next` dist-tag | Prefetch the exact release with `npm exec`; restart with the exact version shown by the plugin |
-| npm global | npm registry | `npm install --global @deepseek-ai/dsh@<version>` |
-| pnpm global | npm registry | `pnpm add --global @deepseek-ai/dsh@<version>` |
-| Yarn Classic global | npm registry | `yarn global add @deepseek-ai/dsh@<version>` |
-| Bun global | npm registry | `bun add --global @deepseek-ai/dsh@<version>` |
-| npm project | npm registry | `npm install @deepseek-ai/dsh@<version>` in the owning project |
-| pnpm project | npm registry | `pnpm update @deepseek-ai/dsh@<version>` in the owning project |
-| Yarn project | npm registry | `yarn add @deepseek-ai/dsh@<version>` in the owning project |
-| Bun project | npm registry | `bun update @deepseek-ai/dsh@<version>` in the owning project |
-| Git source checkout | configured upstream branch | fast-forward pull, `pnpm install --frozen-lockfile`, and `pnpm run build` |
+| `npx` / `npm exec` cache | Highest eligible npm version | Prefetch the exact release with `npm exec`; restart with the exact version shown by the plugin |
+| npm global | Highest eligible npm version | `npm install --global @deepseek-ai/dsh@<version>` |
+| pnpm global | Highest eligible npm version | `pnpm add --global @deepseek-ai/dsh@<version>` |
+| Yarn Classic global | Highest eligible npm version | `yarn global add @deepseek-ai/dsh@<version>` |
+| Bun global | Highest eligible npm version | `bun add --global @deepseek-ai/dsh@<version>` |
+| npm project | Highest eligible npm version | `npm install @deepseek-ai/dsh@<version>` in the owning project |
+| pnpm project | Highest eligible npm version | `pnpm update @deepseek-ai/dsh@<version>` in the owning project |
+| Yarn project | Highest eligible npm version | `yarn add @deepseek-ai/dsh@<version>` in the owning project |
+| Bun project | Highest eligible npm version | `bun update @deepseek-ai/dsh@<version>` in the owning project |
+| Git source checkout | Eligible version at configured upstream head | fast-forward pull, `pnpm install --frozen-lockfile`, and `pnpm run build` |
 
 Yarn and Bun work through the published npm package metadata but are not first-class DSH installation methods. An unrecognized package layout remains checkable but the plugin will not guess an update command.
 
@@ -90,7 +91,9 @@ The check fetches the configured upstream branch and compares `HEAD...FETCH_HEAD
 
 ## Configuration
 
-The bundle works without configuration. Override its row in `~/.dsh/profiles/web/cordis.patch.yml` when needed:
+The **Eligible releases** dropdown in **Settings → DSH Updater** is persisted in `$DSH_HOME/dsh-updater.json` (or `~/.dsh/dsh-updater.json`). **Stable only** is the default. Eligibility is cumulative: RC includes stable, Beta includes RC and stable, and Alpha includes all four recognized classes. Changing it immediately discards any staged candidate validation and performs a fresh discovery; the newly selected exact candidate must pass the full safety gate before application. Invalid stored values and unknown prerelease labels fail closed to stable-only eligibility.
+
+The bundle works without composition configuration. Override its row in `~/.dsh/profiles/web/cordis.patch.yml` when needed:
 
 ```yaml
 - id: dsh-updater
@@ -118,14 +121,15 @@ The browser refreshes the Host status every minute, whenever the page becomes vi
 
 ## Security model
 
-The Host exposes four fixed endpoints:
+The Host exposes fixed endpoints:
 
 - `GET /dsh-updater/status`
 - `POST /dsh-updater/check`
 - `POST /dsh-updater/validate`
 - `POST /dsh-updater/update`
+- `POST /dsh-updater/release-eligibility/{stable|rc|beta|alpha}` (four exact registered routes)
 
-All endpoints require a loopback client. Mutating endpoints additionally require a same-origin request. The validation and update endpoints accept no command, version, path, package name, prompt, or environment data from the browser. The Host stages the exact discovered version or Git commit, and update refuses unless that exact target has a passing gate. Registry and GitHub changelog text is capped at 64 KiB and rendered as plain text rather than HTML; it never controls an update command. Candidate startup receives a small environment allowlist plus isolated state directories; it does not inherit provider credentials. Update subprocesses use fixed Host-selected argument arrays, run in an owned process group on POSIX, terminate the complete process tree on cancellation, and omit environment keys containing `KEY`, `SECRET`, `TOKEN`, or `PASSWORD`. Windows invokes active package-manager `.cmd` shims through the system command processor, but no browser-controlled command text reaches it.
+All endpoints require a loopback client. Mutating endpoints additionally require a same-origin request. The validation and update endpoints accept no command, version, path, package name, prompt, or environment data from the browser. Release eligibility is selected only through one of four fixed no-body routes. The Host stages the exact eligible discovered version or Git commit, and update refuses unless that exact target has a passing gate. Registry and GitHub changelog text is capped at 64 KiB and rendered as plain text rather than HTML; it never controls an update command. Candidate startup receives a small environment allowlist plus isolated state directories; it does not inherit provider credentials. Update subprocesses use fixed Host-selected argument arrays, run in an owned process group on POSIX, terminate the complete process tree on cancellation, and omit environment keys containing `KEY`, `SECRET`, `TOKEN`, or `PASSWORD`. Windows invokes active package-manager `.cmd` shims through the system command processor, but no browser-controlled command text reaches it.
 
 Candidate execution is isolated from the active installation's state directories, environment credentials, package files, and source working tree; it is not an OS security sandbox. Candidate code still runs as the updater's operating-system user and must come from a trusted DSH registry or Git upstream.
 

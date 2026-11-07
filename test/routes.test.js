@@ -40,11 +40,13 @@ test('web routes expose status and protect update mutations', async () => {
   let checks = 0
   let validations = 0
   let updates = 0
+  const eligibilityChanges = []
   const controller = {
     snapshot: () => state,
     async check() { checks += 1; return state },
     async validate() { validations += 1; return state },
     async update() { updates += 1; return state },
+    async setReleaseEligibility(value) { eligibilityChanges.push(value); return { ...state, releaseEligibility: value } },
   }
   const dispose = registerUpdaterRoutes(webServer, controller)
 
@@ -97,6 +99,14 @@ test('web routes expose status and protect update mutations', async () => {
   })
   assert.equal(validated.res.statusCode, 200)
   assert.equal(validations, 1)
+
+  const eligibility = await invoke(routes.get('/dsh-updater/release-eligibility/beta'), {
+    method: 'POST',
+    headers: { host: '127.0.0.1:3080', origin: 'http://127.0.0.1:3080' },
+  })
+  assert.equal(eligibility.res.statusCode, 200)
+  assert.equal(eligibility.value.releaseEligibility, 'beta')
+  assert.deepEqual(eligibilityChanges, ['beta'])
 
   const wrongMethod = await invoke(routes.get('/dsh-updater/status'), { method: 'POST' })
   assert.equal(wrongMethod.res.statusCode, 405)
