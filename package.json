@@ -1,7 +1,7 @@
 {
   "name": "dsh-updater",
-  "version": "0.4.0",
-  "description": "Changelog-aware DSH update recovery gated by isolated candidate tests",
+  "version": "0.5.0",
+  "description": "Changelog-aware DSH updates gated by profile-aware candidate tests, with verified restart and rescue fallback",
   "type": "module",
   "main": "./lib/index.js",
   "exports": {
@@ -32,7 +32,7 @@
     }
   },
   "scripts": {
-    "test": "node --check lib/index.js && node --check lib/candidate.js && node --check lib/client.js && node --test"
+    "test": "node --check lib/index.js && node --check lib/candidate.js && node --check lib/browser.js && node --check lib/restart.js && node --check lib/restart-helper.js && node --check lib/client.js && node --test"
   },
   "keywords": [
     "dsh",

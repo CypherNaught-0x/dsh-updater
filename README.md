@@ -1,6 +1,6 @@
 # dsh-updater
 
-An install-aware update plugin for the DeepSeek Harness Web profile. It checks the release source that matches the running DSH installation, tests the exact candidate separately in every supported TUI/Web mode, and provides an AI recovery handoff whose finish line is the newly available version running locally.
+An install-aware update plugin for the DeepSeek Harness Web profile. It checks the release source that matches the running DSH installation, tests the exact candidate in every supported TUI/Web mode **and against a copy of your own profile in a headless browser**, restarts DSH after updating and verifies that the UI actually boots, and falls back to a minimal **rescue** profile — from which DSH can repair itself — when your profile does not.
 
 ## Features
 
@@ -12,7 +12,9 @@ An install-aware update plugin for the DeepSeek Harness Web profile. It checks t
 - Shows release notes before validation or application, preferring changelog fields in the selected npm version metadata and falling back to the matching [DeepSeek Harness GitHub Release](https://github.com/deepseek-ai/deepseek-harness/releases).
 - Shows an update banner in `shell.overlay`, a persistent sidebar footer action, and a complete **Settings → DSH Updater** page.
 - Stages each candidate outside the active installation and runs blocking startup checks in every TUI/Web mode the release actually provides before enabling the update action.
-- Starts Web on loopback port `0`, waits for the settled `dsh web:` URL, verifies its browser-token exchange and authenticated root response, and shuts the candidate process down cleanly.
+- Starts Web on loopback port `0`, waits for the settled `dsh web:` URL, verifies its browser-token exchange and authenticated root response, boots the UI in a headless Chromium-family browser until every plugin activates (catching `Failed to load plugins` / `N entries did not activate`), and shuts the candidate process down cleanly.
+- Boots the candidate a second time with a copy-on-write clone of **your active profile** (plugins, lockfile, pnpm patches, compatibility approvals, home-level patch layer). A profile whose UI fails to boot blocks the update; plugins that the launcher's compatibility gate would skip are listed as a non-blocking **Warning** with an **Ask AI to fix plugins** handoff.
+- After applying an update, restarts DSH through a detached helper, re-runs the boot check against the restarted server, and opens a browser tab only once it passes. If the profile does not boot, the helper starts the `rescue` profile (DSH base + Web app + this updater) and shows a recovery banner with **Ask AI to repair** and **Restart into ‹profile›**.
 - Reports a TUI profile omitted by the release as **Not shipped**; a present-but-crashing TUI, failed candidate install/build, or failed Web startup remains blocking and leaves the active installation unchanged.
 - Offers a user-controlled AI recovery prompt with the candidate path, installation context, and bounded diagnostics; the agent is directed to fix local configuration or plugin compatibility first, escalate to a DSH release fix only when necessary, apply the working update, restart DSH, and verify the new version is actually running.
 - Reports check, validation, and update progress, successful completion, up-to-date results, and request failures immediately in the GUI.
@@ -59,6 +61,20 @@ Current DSH releases ship built-in Web and headless profiles but no built-in TUI
 
 When validation is blocked, the settings page shows the TUI/Web matrix and an optional **Ask AI to finish update** action. The action asks for confirmation through the button gesture, then places a bounded recovery prompt in the current conversation composer; if no conversation is available, it copies the prompt when clipboard access is available. The agent owns the update end to end: diagnose local configuration, profile, updater, and plugin compatibility before blaming the release; publish and rediscover a replacement only when the candidate itself is defective; apply the working target to the installation that owns the running process; restart DSH; and confirm the running version matches the selected package version or validated source commit. Placing the prompt transfers the task but does not mark recovery complete. Revalidation always stages the authoritative release again, so local edits to a downloaded package remain diagnostic only.
 
+## Restart, verification, and rescue mode
+
+The running Node process cannot replace itself, so the Host hands restarts to `lib/restart-helper.js`, a detached process that outlives the server:
+
+1. The Host writes a job to `$DSH_HOME`, starts the helper, and exits through DSH's own graceful SIGTERM shutdown.
+2. The helper waits for the old process to exit (escalating to SIGKILL after 20 s), then starts the **original** `dsh` command line again with `--no-open`, detached, logging to `$DSH_HOME/logs/dsh-updater-restart-*.log`.
+3. It waits for the `dsh web:` URL, checks the authenticated root, and boots the UI in a headless browser. On success it opens the token URL in your default browser (unless the original command had `--no-open`).
+4. If the server crashes or the UI does not boot, the helper stops it and runs `dsh --profile rescue --from-default-profile web --dump-config` plus `dsh plugin --profile rescue add link:<this updater>`, then starts and verifies `dsh --profile rescue` with the same app flags. The rescue profile has no third-party plugins except this updater; sessions and credentials under `$DSH_HOME` stay available, so you can use DSH itself to repair the broken profile.
+5. Progress and the outcome are written to `$DSH_HOME/dsh-updater-restart.json` (never the environment or the login token) and shown in the banner and on the settings page. **Restart into ‹profile›** in rescue mode repeats the same verified restart with the original command.
+
+The helper only ever relaunches the `@deepseek-ai/dsh` CLI that is running now; it refuses any other entry point. Restarts are not available for `npx` runs. When DSH was started in a terminal, the restarted server runs in the background and logs to the file above.
+
+**Restart DSH** on the settings page uses the same verified path without an update.
+
 ## Supported update plans
 
 | Detected installation | Check source | Action after candidate validation |
@@ -76,7 +92,7 @@ When validation is blocked, the settings page shows the TUI/Web matrix and an op
 
 Yarn and Bun work through the published npm package metadata but are not first-class DSH installation methods. An unrecognized package layout remains checkable but the plugin will not guess an update command.
 
-The normal **Apply verified update** action changes files on disk; the currently running Node process is not replaced, so restart DSH afterward. An AI recovery handoff has a stricter finish line: it must carry the operation through that restart and verify the updater's **Running** value and `dsh --version` match the selected target. The `npx` action prepares the release in npm's execution cache because an ephemeral invocation has no durable installation to replace.
+The normal **Apply verified update** action changes files on disk and then — unless `restartAfterUpdate` is `false` — performs the verified restart described above. An AI recovery handoff has a stricter finish line: it must carry the operation through that restart and verify the updater's **Running** value and `dsh --version` match the selected target. The `npx` action prepares the release in npm's execution cache because an ephemeral invocation has no durable installation to replace.
 
 ## Source checkout safety
 
@@ -105,6 +121,10 @@ The bundle works without composition configuration. Override its row in `~/.dsh/
     candidateTimeoutMinutes: 20
     startupTimeoutSeconds: 60
     updateTimeoutMinutes: 20
+    browserProbe: true
+    browserExecutable: ''
+    browserTimeoutSeconds: 45
+    restartAfterUpdate: true
 ```
 
 | Field | Default | Purpose |
@@ -116,6 +136,10 @@ The bundle works without composition configuration. Override its row in `~/.dsh/
 | `candidateTimeoutMinutes` | `20` | Per-command timeout while staging, installing, or building a candidate |
 | `startupTimeoutSeconds` | `60` | Maximum wait for each candidate TUI or Web startup check |
 | `updateTimeoutMinutes` | `20` | Per-command timeout for the active-installation update plan |
+| `browserProbe` | `true` | Boot the Web UI in a headless browser during candidate validation and after restarts |
+| `browserExecutable` | `''` | Chromium-family browser to use; empty searches `DSH_UPDATER_BROWSER`, installed Chrome/Chromium/Edge/Brave, then Playwright's cache. Without one, the browser check is reported as **Skipped** |
+| `browserTimeoutSeconds` | `45` | Maximum wait for the UI to finish booting |
+| `restartAfterUpdate` | `true` | Restart and verify DSH automatically after a successful update |
 
 The browser refreshes the Host status every minute, whenever the page becomes visible, and every two seconds while candidate validation is running so the active stage remains visible. Only the Host performs release checks and update commands.
 
@@ -127,11 +151,12 @@ The Host exposes fixed endpoints:
 - `POST /dsh-updater/check`
 - `POST /dsh-updater/validate`
 - `POST /dsh-updater/update`
+- `POST /dsh-updater/restart` and `POST /dsh-updater/restart/dismiss`
 - `POST /dsh-updater/release-eligibility/{stable|rc|beta|alpha}` (four exact registered routes)
 
 All endpoints require a loopback client. Mutating endpoints additionally require a same-origin request. The validation and update endpoints accept no command, version, path, package name, prompt, or environment data from the browser. Release eligibility is selected only through one of four fixed no-body routes. The Host stages the exact eligible discovered version or Git commit, and update refuses unless that exact target has a passing gate. Registry and GitHub changelog text is capped at 64 KiB and rendered as plain text rather than HTML; it never controls an update command. Candidate startup receives a small environment allowlist plus isolated state directories; it does not inherit provider credentials. Update subprocesses use fixed Host-selected argument arrays, run in an owned process group on POSIX, terminate the complete process tree on cancellation, and omit environment keys containing `KEY`, `SECRET`, `TOKEN`, or `PASSWORD`. Windows invokes active package-manager `.cmd` shims through the system command processor, but no browser-controlled command text reaches it.
 
-Candidate execution is isolated from the active installation's state directories, environment credentials, package files, and source working tree; it is not an OS security sandbox. Candidate code still runs as the updater's operating-system user and must come from a trusted DSH registry or Git upstream.
+Candidate execution is isolated from the active installation's state directories, environment credentials, package files, and source working tree; it is not an OS security sandbox. Candidate code still runs as the updater's operating-system user and must come from a trusted DSH registry or Git upstream. The profile check runs your installed plugins with the same isolated `HOME`/`DSH_HOME` (no sessions or credentials are copied), but plugins can still reach local services such as a memory daemon on loopback, and linked (`link:`) plugins are loaded from their real source directories.
 
 This protection assumes the normal direct loopback DSH Web server. Do not expose the updater through a reverse proxy that makes remote traffic appear to originate from loopback; the plugin does not add user authentication to DSH.
 
@@ -151,7 +176,10 @@ The plugin ships plain JavaScript and requires no build step:
 dsh-updater/
 ├── lib/
 │   ├── index.js     # Host detection, gate state, update plans, and HTTP endpoints
-│   ├── candidate.js # Isolated staging plus TUI/Web startup smoke checks
+│   ├── candidate.js # Isolated staging, TUI/Web startup smoke checks, and the profile clone check
+│   ├── browser.js   # Headless Chromium boot probe over the DevTools protocol
+│   ├── restart.js   # Restart scheduling, verification, and rescue fallback
+│   ├── restart-helper.js # Detached process that performs the restart
 │   └── client.js    # Overlay, sidebar action, settings page, and AI recovery UX
 ├── test/
 ├── cordis.patch.yml

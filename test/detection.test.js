@@ -290,7 +290,7 @@ test('package controller chooses the prerelease channel and exact update target'
   controller.initialize()
   const checked = await controller.check()
   assert.equal(checked.updateAvailable, true)
-  assert.equal(checked.updaterApiVersion, 4)
+  assert.equal(checked.updaterApiVersion, 5)
   assert.equal(checked.latestTag, 'next')
   assert.deepEqual(checked.changelog, { source: 'npm', text: 'Changes in 1.0.0-rc.2', url: 'https://registry.example.test/1.0.0-rc.2' })
   assert.equal(checked.install.commandPreview, 'npm install --global @deepseek-ai/dsh@1.0.0-rc.2')
